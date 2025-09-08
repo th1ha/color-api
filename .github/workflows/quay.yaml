@@ -1,0 +1,85 @@
+name: Create Container Image and push to quay.io
+
+on:
+  workflow_dispatch:
+    inputs:
+      REPO_NAME:
+        description: Repository name
+        type: string
+        required: true
+      IMAGE_TAG:
+        description: Define the Image tags || the default is 'latest'
+        type: string
+        required: false
+
+env:
+  REGISTRY_USER: ${{ secrets.QUAY_USERNAME }}
+  IMAGE_REGISTRY: ${{ vars.IMAGE_REGISTRY }}
+  REGISTRY_NAMESPACE: ${{ vars.REGISTRY_NAMESPACE }}
+  REPO_NAME: ${{ inputs.REPO_NAME }}
+  IMAGE_TAG: ${{ inputs.IMAGE_TAG || 'latest' }}
+  REGISTRY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}
+
+jobs:
+  build-image:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout repo
+        uses: actions/checkout@v4
+
+      - name: Log in to Quay.io
+        uses: redhat-actions/podman-login@v1
+        with:
+          username: ${{ env.REGISTRY_USER }}
+          password: ${{ env.REGISTRY_PASSWORD }}
+          registry: ${{ env.IMAGE_REGISTRY }}
+
+      - name: Ensure Buildah storage dir
+        run: mkdir -p "${HOME}/.local/share/containers/storage"
+
+      - name: Restore Buildah cache
+        uses: actions/cache/restore@v4
+        id: restore-cache
+        with:
+          path: ~/.local/share/containers/storage
+          key: ${{ runner.os }}-buildah-storage-${{ hashFiles('Containerfile') }}
+          restore-keys: |
+            ${{ runner.os }}-buildah-storage-
+
+      - name: Buildah Action
+        id: build-image
+        uses: redhat-actions/buildah-build@v2
+        with:
+          image: ${{ env.REPO_NAME }}
+          tags: ${{ env.IMAGE_TAG }} ${{ github.sha }}
+          containerfiles: |
+            ./Containerfile
+          layers: true
+
+      - name: Fix permissions for cache
+        run: |
+          sudo chown -R $USER:$USER ~/.local/share/containers/storage
+
+      - name: Save Buildah cache
+        if: ${{ steps.restore-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.local/share/containers/storage
+          key: ${{ runner.os }}-buildah-storage-${{ hashFiles('Containerfile') }}
+
+      - name: check the output
+        run: |
+          echo "${{ steps.build-image.outputs.image }}"
+          echo "${{ steps.build-image.outputs.tags }}"
+
+      - name: Push to quay.io
+        id: push-to-quay
+        uses: redhat-actions/push-to-registry@v2
+        with:
+          image: ${{ steps.build-image.outputs.image }}
+          tags: ${{ env.IMAGE_TAG }}
+          registry: ${{ env.IMAGE_REGISTRY }}/${{ env.REGISTRY_NAMESPACE }}
+          username: ${{ env.REGISTRY_USER }}
+          password: ${{ env.REGISTRY_PASSWORD }}
+      - name: Print image url
+        run: echo "Image pushed to ${{ steps.push-to-quay.outputs.registry-paths }}"
